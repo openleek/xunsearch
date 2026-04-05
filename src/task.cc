@@ -495,8 +495,35 @@ static int send_result_doc(XS_CONN *conn, struct result_doc *rd, struct search_r
 			}
 			rc = conn_respond(conn, CMD_SEARCH_RESULT_MATCHED, 0, data.data(), data.size());
 		}
+	} catch (const Xapian::DatabaseError &e) {
+		// database is corrupted or replaced
+		// rate-limit logging: at most once per 60 seconds
+		static time_t last_db_error_log = 0;
+		static int db_error_count = 0;
+		time_t now = time(NULL);
+
+		db_error_count++;
+		if (now - last_db_error_log >= 60) {
+			if (db_error_count > 1) {
+				log_error_conn("xapian database error on sending doc, %d errors in last 60s (ERROR:%s)",
+						db_error_count, e.get_msg().data());
+			} else {
+				log_error_conn("xapian database error on sending doc (ERROR:%s)", e.get_msg().data());
+			}
+			last_db_error_log = now;
+			db_error_count = 0;
+		}
+
+		if (cr != NULL) {
+#ifdef HAVE_MEMORY_CACHE
+			cr->count = cr->lastid = 0;
+#endif
+		}
+		// return error to break the send loop and disconnect.
+		// on reconnect, the new session will re-initialize via fetch_conn_database()
+		// which handles corrupted/replaced databases with its reopen-with-fallback path.
+		rc = CMD_RES_ERROR;
 	} catch (const Xapian::Error &e) {
-		// ignore the error simply
 		log_error_conn("xapian exception on sending doc (ERROR:%s)", e.get_msg().data());
 		if (cr != NULL) {
 #ifdef HAVE_MEMORY_CACHE
@@ -565,6 +592,35 @@ static void *zarg_get_object(struct search_zarg *zarg, enum object_type type, co
 		oc = oc->next;
 	}
 	return NULL;
+}
+
+/**
+ * Delete a cached object from zarg by type and key
+ * Used to discard a corrupted database handle so it can be reopened fresh
+ * @param zarg
+ * @param type
+ * @param key
+ */
+static void zarg_del_object(struct search_zarg *zarg, enum object_type type, const char *key)
+{
+	struct object_chain **pp = &zarg->objs;
+	while (*pp != NULL) {
+		struct object_chain *oc = *pp;
+		if (oc->type == type
+				&& ((oc->key == NULL && key == NULL)
+					|| (oc->key != NULL && key != NULL && !strcmp(oc->key, key)))) {
+			*pp = oc->next;
+			if (oc->type == OTYPE_DB) {
+				DELETE_PTT(oc->val, Xapian::Database *);
+			}
+			if (oc->key != NULL) {
+				free(oc->key);
+			}
+			debug_free(oc);
+			return;
+		}
+		pp = &oc->next;
+	}
 }
 
 /**
@@ -832,7 +888,18 @@ static inline Xapian::Database *fetch_conn_database(XS_CONN *conn, const char *n
 		zarg_add_object(zarg, OTYPE_DB, name, db);
 		log_debug_conn("new (Xapian::Database *) %p (KEY:%s)", db, name);
 	} else {
-		db->reopen();
+		try {
+			db->reopen();
+		} catch (const Xapian::DatabaseError &e) {
+			// reopen failed (database may have been replaced or corrupted)
+			// discard the old handle and open a fresh one
+			log_notice_conn("reopen failed, recreating database handle (KEY:%s, ERROR:%s)",
+					name, e.get_msg().data());
+			zarg_del_object(zarg, OTYPE_DB, name);
+			db = new Xapian::Database(string(conn->user->home) + "/" + string(name));
+			db->keep_alive();
+			zarg_add_object(zarg, OTYPE_DB, name, db);
+		}
 	}
 	return db;
 }
