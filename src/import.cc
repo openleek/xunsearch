@@ -924,6 +924,7 @@ int main(int argc, char *argv[])
 	// check to archive
 	if ((flag & FLAG_DEFAULT_DB) && (database.get_doccount() >= DEFAULT_ARCHIVE_THRESHOLD)) {
 		char *ptr = strrchr(db_path, '/');
+		int arc_ok = 0;
 
 		log_alert("compact the database into archive (DB:%s, TOTAL:%d)", db_path, database.get_doccount());
 		if (ptr != NULL) {
@@ -935,31 +936,62 @@ int main(int argc, char *argv[])
 		if (flag & FLAG_ARCHIVE) {
 			archive.close();
 
-			// 1. merge: db_a + db -> db_c
-			log_info("rm -rf db_c");
-			system("/bin/rm -rf " DEFAULT_DB_NAME "_c");
-			log_info("xapian-compact db + db_a = db_c");
-			system(XAPIAN_DIR "/bin/xapian-compact -n " DEFAULT_DB_NAME "_a " DEFAULT_DB_NAME " " DEFAULT_DB_NAME "_c");
-			// 2. remove: db_o db
-			log_info("rm -rf db_o db");
-			system("/bin/rm -rf " DEFAULT_DB_NAME "_o " DEFAULT_DB_NAME);
-			// 3. rename: db_a -> db_o, db_c -> db_a
+			// 1. clean stale intermediate dirs from previous failed attempts
+			log_info("rm -rf db_c db_o");
+			system("/bin/rm -rf " DEFAULT_DB_NAME "_c " DEFAULT_DB_NAME "_o");
+
+			// 2. merge: db_a + db -> db_c
+			log_info("xapian-compact db_a + db = db_c");
+			if (system(XAPIAN_DIR "/bin/xapian-compact -n " DEFAULT_DB_NAME "_a " DEFAULT_DB_NAME " " DEFAULT_DB_NAME "_c") != 0) {
+				log_error("xapian-compact failed, abort archive");
+				goto arc_end;
+			}
+
+			// 3. rotate: db_a -> db_o (backup old archive)
 			log_info("mv -f db_a db_o");
-			system("/bin/mv -f " DEFAULT_DB_NAME "_a " DEFAULT_DB_NAME "_o");
+			if (system("/bin/mv -f " DEFAULT_DB_NAME "_a " DEFAULT_DB_NAME "_o") != 0) {
+				log_error("failed to move db_a to db_o, abort archive");
+				goto arc_end;
+			}
+
+			// 4. promote: db_c -> db_a (new archive in place)
 			log_info("mv -f db_c db_a");
-			system("/bin/mv -f " DEFAULT_DB_NAME "_c " DEFAULT_DB_NAME "_a");
+			if (system("/bin/mv -f " DEFAULT_DB_NAME "_c " DEFAULT_DB_NAME "_a") != 0) {
+				log_error("failed to move db_c to db_a, attempt rollback db_o -> db_a");
+				if (system("/bin/mv -f " DEFAULT_DB_NAME "_o " DEFAULT_DB_NAME "_a") != 0) {
+					log_error("rollback also failed, db_a missing! manual recovery needed from db_o");
+				}
+				goto arc_end;
+			}
+
+			// 5. new archive is safe, now remove old backup
+			log_info("rm -rf db_o");
+			system("/bin/rm -rf " DEFAULT_DB_NAME "_o");
+
+			// 6. remove old db (its data is now merged into db_a)
+			log_info("rm -rf db");
+			if (system("/bin/rm -rf " DEFAULT_DB_NAME) != 0) {
+				log_error("failed to remove old db after archive, search may return duplicates");
+			}
+			arc_ok = 1;
 		} else {
-			// 1. remove: db_a (clean)
-			log_info("rm -rf db_a");
-			system("/bin/rm -rf " DEFAULT_DB_NAME "_a");
-			// 2. rename: db -> db_a
+			// no existing archive: just rename db -> db_a
 			log_info("mv -f db db_a");
-			system("/bin/mv -f " DEFAULT_DB_NAME " " DEFAULT_DB_NAME "_a");
+			if (system("/bin/mv -f " DEFAULT_DB_NAME " " DEFAULT_DB_NAME "_a") != 0) {
+				log_error("failed to move db to db_a, abort archive");
+				goto arc_end;
+			}
+			arc_ok = 1;
 		}
 
-		// re-create empty db
-		log_info("re-create the empty default db");
-		database = Xapian::WritableDatabase(DEFAULT_DB_NAME, Xapian::DB_CREATE_OR_OPEN);
+arc_end:
+		if (arc_ok) {
+			// re-create empty db
+			log_info("re-create the empty default db");
+			database = Xapian::WritableDatabase(DEFAULT_DB_NAME, Xapian::DB_CREATE_OR_OPEN);
+		} else {
+			log_error("archive aborted, database left as-is to avoid data loss");
+		}
 	}
 	database.close();
 
