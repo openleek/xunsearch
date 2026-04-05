@@ -426,6 +426,12 @@ static int doc_fetch()
 			log_info("~skip to add/del synonyms (TERM:%.*s, SKIP_LEFT:%d)",
 					cmd.blen, term + 1, num_skip - total - 1);
 		} else {
+			if (size < (cmd.blen + cmd.blen1)) {
+				log_error("invalid synonyms command size (SIZE:%d, BLEN:%d, BLEN1:%d)",
+						size, cmd.blen, cmd.blen1);
+				rc = FETCH_ABORT;
+				goto doc_end;
+			}
 			string org_term = Xapian::Unicode::tolower(string(term + 1, cmd.blen));
 			string syn_term = Xapian::Unicode::tolower(string(term + cmd.blen + 1, cmd.blen1));
 #ifdef HAVE_SYNONYMS_STEM
@@ -581,7 +587,16 @@ static int doc_fetch()
 				}
 				// save first value as ID term for logging
 				if (term == NULL) {
-					term = strdup(buf);
+					if (size > 0 && buf != NULL) {
+						term = strdup(buf);
+						if (term == NULL) {
+							rc = FETCH_ABORT;
+							log_error("failed to duplicate doc value for term (SIZE:%d)", size);
+							goto doc_end;
+						}
+					} else {
+						log_notice("skip empty first doc value for term");
+					}
 				}
 				break;
 			case CMD_DOC_INDEX:
