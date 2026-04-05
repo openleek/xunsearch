@@ -219,7 +219,6 @@ static void db_import_call(XS_DB *db, XS_USER *user)
 
 		// check to commit older file first
 		suffix = rcvfile + sprintf(rcvfile, DEFAULT_TEMP_DIR "%s_%s.rcv", user->name, db->name);
-#if SIZEOF_OFF_T < 8
 		for (i = MAX_SPLIT_FILES; i > 0; i--) {
 			sprintf(suffix, ".%d", i);
 			if (!access(rcvfile, R_OK)) {
@@ -233,7 +232,6 @@ static void db_import_call(XS_DB *db, XS_USER *user)
 				break;
 			}
 		}
-#endif	/* LARGEFILE */
 
 		// use new rcvfile
 		if (i == 0) {
@@ -726,7 +724,6 @@ static inline void check_eff_size(int fd)
 static inline void clean_uncommitted_data(XS_DB *db, XS_USER *user)
 {
 	// clean splitted file
-#if SIZEOF_OFF_T < 8
 	int i = 0;
 	char fpath[256], *suffix;
 
@@ -738,7 +735,6 @@ static inline void clean_uncommitted_data(XS_DB *db, XS_USER *user)
 			unlink(fpath);
 		}
 	}
-#endif	/* LARGEFILE */
 
 	// clean current file
 	lseek(db->fd, 0, SEEK_SET);
@@ -974,7 +970,6 @@ static int save_conn_request(XS_CONN *conn)
 		log_notice_conn("auto commit (DB:%s.%s, COUNT:%d)", conn->user->name, db->name, db->count);
 		db_import_call(db, conn->user);
 	}
-#if SIZEOF_OFF_T < 8
 	else if ((db->count - db->lcount) > queue_size) // check to split
 	{
 		struct stat st;
@@ -990,22 +985,27 @@ static int save_conn_request(XS_CONN *conn)
 			suffix = rcvfile2 + strlen(rcvfile2);
 
 			do {
-				sprintf(suffix, ".%d", i++);
-			} while (access(rcvfile2, R_OK) == 0);
+				sprintf(suffix, ".%d", i);
+			} while (access(rcvfile2, R_OK) == 0 && ++i <= MAX_SPLIT_FILES);
 
-			log_notice_conn("auto split data (FILE:%s, COUNT:%d)", rcvfile2, db->count);
-			close(db->fd);
-			db->fd = -1;
-			db->count = db->lcount = 0;
+			if (access(rcvfile2, R_OK) == 0) {
+				// all slots 1..MAX_SPLIT_FILES occupied
+				log_error_conn("too many split files, stop splitting (DB:%s.%s, MAX:%d)",
+						conn->user->name, db->name, MAX_SPLIT_FILES);
+			} else {
+				log_notice_conn("auto split data (FILE:%s, COUNT:%d)", rcvfile2, db->count);
+				close(db->fd);
+				db->fd = -1;
+				db->count = db->lcount = 0;
 
-			// rename the file
-			if (rename(rcvfile, rcvfile2) != 0) {
-				log_error_conn("failed to rename splitted file (FILE:%s, ERROR:%s)",
-						rcvfile2, strerror(errno));
+				// rename the file
+				if (rename(rcvfile, rcvfile2) != 0) {
+					log_error_conn("failed to rename splitted file (FILE:%s, ERROR:%s)",
+							rcvfile2, strerror(errno));
+				}
 			}
 		}
 	}
-#endif	/* LAREFILE */
 
 	// finished
 	rc = CONN_RES_OK(RQST_FINISHED);
