@@ -41,6 +41,7 @@ typedef struct xs_db
 	int fd; // temp fd to save received data
 	int count; // count of uncommitted documents
 	int lcount; // last count of record point
+	int import_fail; // consecutive import failure count
 	pid_t pid; // pid of import process (0 -> not writing)
 	time_t ltime; // last commit time
 

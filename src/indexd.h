@@ -14,6 +14,7 @@
 #define	MIN_COMMIT_COUNT		100			// number of changed
 #define	MIN_COMMIT_TIME			180			// seconds
 #define	MAX_IMPORT_NUM			5			// number of concurrent import processes
+#define	MAX_IMPORT_FAIL			3			// max consecutive import failures before discarding sndfile
 
 #if SIZEOF_OFF_T < 8
 #define	MAX_SPLIT_FILES			10			// max split files (xxx_xx.rcv.[NUM])
