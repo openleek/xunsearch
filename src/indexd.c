@@ -64,6 +64,8 @@ static char xs_import[128], xs_logging[128], *prog_name;
 static volatile int main_flag, import_num;
 
 static int safe_write(int fd, void *buf, int size);
+static inline void update_eff_size(int fd);
+static inline void check_eff_size(int fd);
 
 /**
  * Show version information
