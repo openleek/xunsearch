@@ -986,10 +986,34 @@ int main(int argc, char *argv[])
 
 arc_end:
 		if (arc_ok) {
-			// re-create empty db
-			log_info("re-create the empty default db");
-			database = Xapian::WritableDatabase(DEFAULT_DB_NAME, Xapian::DB_CREATE_OR_OPEN);
+			// re-create empty db with retry for transient lock conflicts
+			// (searchd workers may briefly hold read locks on the db path during reopen)
+			int retry;
+			for (retry = 0; retry < 3; retry++) {
+				try {
+					log_info("re-create the empty default db (ATTEMPT:%d/3)", retry + 1);
+					if (retry > 0) {
+						sleep(1);
+					}
+					database = Xapian::WritableDatabase(DEFAULT_DB_NAME, Xapian::DB_CREATE_OR_OPEN);
+					break;
+				} catch (const Xapian::DatabaseLockError &e) {
+					log_error("lock conflict creating empty db (ATTEMPT:%d/3, ERROR:%s)",
+							retry + 1, e.get_msg().data());
+				} catch (const Xapian::Error &e) {
+					log_error("failed to re-create empty db (ATTEMPT:%d/3, ERROR:%s)",
+							retry + 1, e.get_msg().data());
+					break; // non-lock errors: no point retrying
+				}
+			}
+			if (retry >= 3) {
+				log_error("CRITICAL: empty db creation failed after 3 attempts, "
+						"archive data is safe in db_a, db will be re-created on next import");
+				flag |= FLAG_TERMINATED; // signal non-zero exit to indexd
+			}
 		} else {
+			// archive is an optimization, does not affect imported data (already in db)
+			// do not set FLAG_TERMINATED: import itself succeeded, only archive failed
 			log_error("archive aborted, database left as-is to avoid data loss");
 		}
 	}
