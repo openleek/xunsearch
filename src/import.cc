@@ -933,12 +933,41 @@ int main(int argc, char *argv[])
 		}
 
 		database.close();
+
+		// if db_a is missing but db_o exists (previous failed archive), restore it
+		// NOTE: this check must happen BEFORE FLAG_ARCHIVE test, because FLAG_ARCHIVE
+		// is only set when db_a was successfully opened at startup. In the exact
+		// failure scenario we're recovering from (db_a lost, only db_o remains),
+		// FLAG_ARCHIVE would be false.
+		if (!(flag & FLAG_ARCHIVE)
+				&& access(DEFAULT_DB_NAME "_a", R_OK) != 0
+				&& access(DEFAULT_DB_NAME "_o", R_OK) == 0) {
+			log_notice("db_a missing but db_o found, restoring from previous backup");
+			if (system("/bin/mv -f " DEFAULT_DB_NAME "_o " DEFAULT_DB_NAME "_a") != 0) {
+				log_error("failed to restore db_o -> db_a, abort archive");
+				goto arc_end;
+			}
+			// re-open restored archive and set flag so compact path is taken
+			try {
+				archive = Xapian::WritableDatabase(DEFAULT_DB_NAME "_a", Xapian::DB_OPEN);
+				flag |= FLAG_ARCHIVE;
+				log_notice("restored archive database opened successfully");
+			} catch (const Xapian::Error &e) {
+				// db_a was just restored from db_o and is the last recoverable copy.
+				// Do NOT continue with archive flow — leave db_a for manual recovery.
+				log_error("failed to open restored archive (ERROR:%s), abort to preserve db_a",
+						e.get_msg().data());
+				goto arc_end;
+			}
+		}
+
 		if (flag & FLAG_ARCHIVE) {
 			archive.close();
 
-			// 1. clean stale intermediate dirs from previous failed attempts
-			log_info("rm -rf db_c db_o");
-			system("/bin/rm -rf " DEFAULT_DB_NAME "_c " DEFAULT_DB_NAME "_o");
+			// 1. clean stale intermediate db_c from previous failed attempts
+			// NOTE: keep db_o as recovery fallback until compact succeeds
+			log_info("rm -rf db_c");
+			system("/bin/rm -rf " DEFAULT_DB_NAME "_c");
 
 			// 2. merge: db_a + db -> db_c
 			log_info("xapian-compact db_a + db = db_c");
@@ -947,14 +976,16 @@ int main(int argc, char *argv[])
 				goto arc_end;
 			}
 
-			// 3. rotate: db_a -> db_o (backup old archive)
+			// 4. rotate: compact succeeded (db_c is safe), now clear old db_o and rotate
+			log_info("rm -rf db_o");
+			system("/bin/rm -rf " DEFAULT_DB_NAME "_o");
 			log_info("mv -f db_a db_o");
 			if (system("/bin/mv -f " DEFAULT_DB_NAME "_a " DEFAULT_DB_NAME "_o") != 0) {
 				log_error("failed to move db_a to db_o, abort archive");
 				goto arc_end;
 			}
 
-			// 4. promote: db_c -> db_a (new archive in place)
+			// 5. promote: db_c -> db_a (new archive in place)
 			log_info("mv -f db_c db_a");
 			if (system("/bin/mv -f " DEFAULT_DB_NAME "_c " DEFAULT_DB_NAME "_a") != 0) {
 				log_error("failed to move db_c to db_a, attempt rollback db_o -> db_a");
@@ -963,10 +994,6 @@ int main(int argc, char *argv[])
 				}
 				goto arc_end;
 			}
-
-			// 5. new archive is safe, now remove old backup
-			log_info("rm -rf db_o");
-			system("/bin/rm -rf " DEFAULT_DB_NAME "_o");
 
 			// 6. remove old db (its data is now merged into db_a)
 			log_info("rm -rf db");
@@ -1009,7 +1036,9 @@ arc_end:
 			if (retry >= 3) {
 				log_error("CRITICAL: empty db creation failed after 3 attempts, "
 						"archive data is safe in db_a, db will be re-created on next import");
-				flag |= FLAG_TERMINATED; // signal non-zero exit to indexd
+				// NOTE: do NOT set FLAG_TERMINATED here. Archive already succeeded and
+				// data is safe in db_a. A non-zero exit would cause indexd to keep the
+				// .snd file for retry, leading to duplicate data import.
 			}
 		} else {
 			// archive is an optimization, does not affect imported data (already in db)
