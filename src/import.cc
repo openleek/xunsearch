@@ -1015,22 +1015,33 @@ arc_end:
 		if (arc_ok) {
 			// re-create empty db with retry for transient lock conflicts
 			// (searchd workers may briefly hold read locks on the db path during reopen)
+			//
+			// NOTE: a failed attempt may leave partial files (empty .glass, v.tmp)
+			// in the db directory without a valid iamglass. On the next attempt,
+			// Xapian::DB_CREATE_OR_OPEN sees the non-empty directory as "existing"
+			// and tries OPEN, which then fails with "Failed to open glass revision
+			// file". We rm -rf before each retry to force a clean CREATE path.
 			int retry;
 			for (retry = 0; retry < 3; retry++) {
+				if (retry > 0) {
+					log_notice("cleaning partial db state before retry");
+					system("/bin/rm -rf " DEFAULT_DB_NAME);
+					sleep(1);
+				}
 				try {
 					log_info("re-create the empty default db (ATTEMPT:%d/3)", retry + 1);
-					if (retry > 0) {
-						sleep(1);
-					}
 					database = Xapian::WritableDatabase(DEFAULT_DB_NAME, Xapian::DB_CREATE_OR_OPEN);
 					break;
 				} catch (const Xapian::DatabaseLockError &e) {
 					log_error("lock conflict creating empty db (ATTEMPT:%d/3, ERROR:%s)",
 							retry + 1, e.get_msg().data());
 				} catch (const Xapian::Error &e) {
+					// do NOT break here: the next iteration will rm -rf the directory
+					// and retry with a clean slate. If the failure is persistent
+					// (disk/permission), all 3 attempts will fail and the CRITICAL
+					// branch below handles it.
 					log_error("failed to re-create empty db (ATTEMPT:%d/3, ERROR:%s)",
 							retry + 1, e.get_msg().data());
-					break; // non-lock errors: no point retrying
 				}
 			}
 			if (retry >= 3) {
